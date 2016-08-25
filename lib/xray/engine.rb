@@ -1,5 +1,26 @@
 module Xray
 
+  # Utility class for Sprockets 2+, 3+, and 4+ support.
+  # https://github.com/rails/sprockets/blob/master/guides/extending_sprockets.md#supporting-all-versions-of-sprockets-in-processors
+  class SprocketsWrapper
+    def initialize(path, &block)
+     @path   = path
+     @source = block.call
+    end
+
+    def render(context, _)
+     self.class.run(@path, @source)
+    end
+
+    def self.call(input)
+     path   = input[:source_path] || input[:filename]
+     source = input[:data]
+     run(path, source)
+    end
+
+    # Subclasses expected to implement `self.run`
+  end
+
   # This is the main point of integration with Rails. This engine hooks into
   # Sprockets and monkey patches ActionView in order to augment the app's JS
   # and HTML templates with filepath information that can be used by xray.js
@@ -16,17 +37,20 @@ module Xray
     config.after_initialize do |app|
       ensure_asset_pipeline_enabled! app
 
+      class AugmentJS < SprocketsWrapper
+        def self.run(path, source)
+          if path =~ /^#{Rails.root}.+\.(js|coffee)(\.|$)/
+            Xray.augment_js(source, path)
+          else
+            source
+          end
+        end
+      end
+
       # Register as a Sprockets processor to augment JS files, including
       # compiled coffeescript, with filepath information. See
       # `Xray.augment_js` for details.
-      app.assets.register_postprocessor 'application/javascript', :xray do |context, data|
-        path = context.pathname.to_s
-        if path =~ /^#{app.root}.+\.(js|coffee)(\.|$)/
-          Xray.augment_js(data, path)
-        else
-          data
-        end
-      end
+      app.assets.register_postprocessor 'application/javascript', AugmentJS
 
       # Monkey patch ActionView::Template to augment server-side templates
       # with filepath information. See `Xray.augment_template` for details.
@@ -52,15 +76,18 @@ module Xray
         alias_method_chain :render, :xray
       end
 
-      # Augment JS templates
-      app.assets.register_preprocessor 'application/javascript', :xray do |context, source|
-        path = context.pathname.to_s
-        if path =~ /^#{app.root}.+\.(jst)(\.|$)/
-          Xray.augment_template(source, path)
-        else
-          source
+      class AugmentTemplate < SprocketsWrapper
+        def self.run(path, source)
+          if path =~ /^#{Rails.root}.+\.(jst)(\.|$)/
+            Xray.augment_template(source, path)
+          else
+            source
+          end
         end
       end
+
+      # Augment JS templates
+      app.assets.register_preprocessor 'application/javascript', AugmentTemplate
 
       # This event is called near the beginning of a request cycle. We use it to
       # collect information about the controller and action that is responding, for
